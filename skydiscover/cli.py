@@ -51,9 +51,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "evaluation_file",
+        nargs="?",
+        default=None,
         help=(
             "Evaluator: path to a Python file (must define evaluate()) "
-            "or a benchmark directory containing Dockerfile + evaluate.sh"
+            "or a benchmark directory containing Dockerfile + evaluate.sh. "
+            "Can be omitted if using --kernelbench-level and --kernelbench-problem-id."
         ),
     )
     parser.add_argument("--config", "-c", help="Path to configuration file (YAML)", default=None)
@@ -93,6 +96,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Search algorithm to use",
     )
+    parser.add_argument(
+        "--kernelbench-level",
+        type=int,
+        default=None,
+        help="KernelBench difficulty level (1-4) for kernel evolution",
+    )
+    parser.add_argument(
+        "--kernelbench-problem-id",
+        type=int,
+        default=None,
+        help="KernelBench problem ID for kernel evolution",
+    )
 
     return parser.parse_args()
 
@@ -107,12 +122,57 @@ async def main_async() -> int:
     args = parse_args()
     _configure_logging(args.log_level)
 
+    # Handle KernelBench kernel loading
+    if args.kernelbench_level is not None or args.kernelbench_problem_id is not None:
+        from skydiscover.extras.kernelbench import (
+            create_kernelbench_evaluator,
+            save_kernelbench_kernel_to_file,
+        )
+
+        if not args.kernelbench_level or not args.kernelbench_problem_id:
+            print(
+                "Error: Both --kernelbench-level and --kernelbench-problem-id must be specified",
+                file=sys.stderr,
+            )
+            return 1
+
+        try:
+            # Create temporary directory for KernelBench artifacts
+            import tempfile
+            temp_dir = tempfile.mkdtemp(prefix="kernelbench_")
+            kernel_file = os.path.join(temp_dir, "initial_program.py")
+            evaluator_file = os.path.join(temp_dir, "evaluator.py")
+
+            # Load kernel from HuggingFace and save locally
+            kernel_path = save_kernelbench_kernel_to_file(
+                args.kernelbench_level, args.kernelbench_problem_id, kernel_file
+            )
+            print(f"Loaded KernelBench kernel from level {args.kernelbench_level}, problem {args.kernelbench_problem_id}")
+            print(f"Saved to: {kernel_path}")
+
+            # Create evaluator script
+            evaluator_path = create_kernelbench_evaluator(
+                args.kernelbench_level, args.kernelbench_problem_id
+            )
+            print(f"Created evaluator: {evaluator_path}")
+
+            # Override the arguments
+            args.initial_program = kernel_path
+            args.evaluation_file = evaluator_path
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+
     if args.initial_program and not os.path.exists(args.initial_program):
         print(f"Error: Initial program file '{args.initial_program}' not found", file=sys.stderr)
         return 1
-    if not os.path.exists(args.evaluation_file):
-        print(f"Error: Evaluation file '{args.evaluation_file}' not found", file=sys.stderr)
-        return 1
+    if not (args.kernelbench_level or args.kernelbench_problem_id):
+        if not args.evaluation_file:
+            print("Error: Either provide evaluation_file or use --kernelbench-level and --kernelbench-problem-id", file=sys.stderr)
+            return 1
+        if not os.path.exists(args.evaluation_file):
+            print(f"Error: Evaluation file '{args.evaluation_file}' not found", file=sys.stderr)
+            return 1
 
     has_overrides = any((args.api_base, args.model, args.agentic, args.search))
     config = None
